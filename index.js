@@ -42,7 +42,7 @@ app.post('/api/generate-image', async (req, res) => {
 
     const rawCookies = JSON.parse(process.env.GOOGLE_COOKIES_JSON);
 
-    // Clean cookies to remove null partitionKeys and incompatible attributes (fixes CDP serialization error)
+    // Clean cookies to remove null partitionKeys and incompatible attributes
     const sanitizedCookies = rawCookies.map(cookie => {
       const cleanCookie = { ...cookie };
       if (!cleanCookie.partitionKey || cleanCookie.partitionKey === null) {
@@ -149,47 +149,37 @@ app.post('/api/generate-image', async (req, res) => {
       await page.keyboard.press('Enter');
     }
 
-    console.log('[Google Flow] Generation triggered. Waiting for image result (Multi-strategy scan)...');
+    console.log('[Google Flow] Generation triggered. Waiting for image result (Fast scan)...');
 
-    // STEP 6: Robust multi-strategy image extractor (up to 150 seconds)
+    // STEP 6: Fast, non-blocking image extractor (up to 150 seconds)
     const imageUrl = await page.evaluate(async () => {
       const startTime = Date.now();
       while (Date.now() - startTime < 150000) {
         
-        // Strategy A: Check standard <img> tags
-        const allImgs = Array.from(document.querySelectorAll('img'));
-        const foundImg = allImgs.find(i => {
-          const src = i.src || '';
-          return (src.includes('googleusercontent') || src.startsWith('blob:') || src.startsWith('http')) && 
-                 !src.includes('favicon') && 
-                 !src.includes('avatar') &&
-                 (i.naturalWidth > 100 || i.width > 100);
-        });
-        if (foundImg) return foundImg.src;
-
-        // Strategy B: Check elements with background-image styles
-        const allElements = Array.from(document.querySelectorAll('*'));
-        for (const el of allElements) {
-          const bg = window.getComputedStyle(el).backgroundImage;
-          if (bg && bg.includes('url(')) {
-            const match = bg.match(/url\(['"]?(.*?)['"]?\)/);
-            if (match && match[1] && (match[1].startsWith('http') || match[1].startsWith('blob:'))) {
-              if (!match[1].includes('favicon')) {
-                return match[1];
-              }
-            }
+        // 1. Check all <img> tags efficiently
+        const imgs = document.querySelectorAll('img');
+        for (const img of imgs) {
+          const src = img.src || '';
+          if (src && 
+              !src.includes('favicon') && 
+              !src.includes('avatar') && 
+              !src.includes('icon') &&
+              (img.naturalWidth > 150 || img.width > 150 || src.includes('googleusercontent') || src.startsWith('blob:'))) {
+            return src;
           }
         }
 
-        // Strategy C: Check download or preview anchor links pointing to images
-        const links = Array.from(document.querySelectorAll('a[href]'));
-        const imgLink = links.find(a => {
-          const href = a.href || '';
-          return href.includes('googleusercontent') || href.endsWith('.png') || href.endsWith('.jpg') || href.endsWith('.webp');
-        });
-        if (imgLink) return imgLink.href;
+        // 2. Check canvas elements (if rendered via WebGL/Canvas)
+        const canvases = document.querySelectorAll('canvas');
+        for (const canvas of canvases) {
+          if (canvas.width > 100 && canvas.height > 100) {
+            try {
+              return canvas.toDataURL('image/png');
+            } catch (e) {}
+          }
+        }
 
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2000));
       }
       return null;
     });
@@ -213,4 +203,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-      
+                                                   
