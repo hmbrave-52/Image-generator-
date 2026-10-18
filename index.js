@@ -1,77 +1,32 @@
 const express = require('express');
+const cors = require('cors');
 const puppeteer = require('puppeteer');
-const { Groq } = require('groq-sdk');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-
-// --- DYNAMIC GROQ KEY ROTATOR ---
-let groqKeys = [];
-try {
-  groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON || '[]');
-} catch (e) {
-  console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON.');
-}
-
-if (groqKeys.length === 0 && process.env.GROQ_API_KEY) {
-  groqKeys.push(process.env.GROQ_API_KEY);
-}
-
-console.log(`[Groq Manager] Successfully loaded ${groqKeys.length} API keys into rotation pool.`);
-
-let currentKeyIndex = 0;
-
-function getGroqClient() {
-  if (groqKeys.length === 0) {
-    throw new Error('No Groq API keys found in environment variables.');
-  }
-  return new Groq({ apiKey: groqKeys[currentKeyIndex] });
-}
-
-async function callGroqVisionWithRotation(messages, options = {}) {
-  let attempts = 0;
-  while (attempts < groqKeys.length) {
-    try {
-      const groq = getGroqClient();
-      const response = await groq.chat.completions.create({
-        model: 'qwen/qwen3.8-27b',
-        messages: messages,
-        temperature: options.temperature || 0.1,
-        max_completion_tokens: options.max_tokens || 512,
-      });
-      return response.choices[0]?.message?.content || '';
-    } catch (error) {
-      if (error.status === 429 || error.status === 401) {
-        console.warn(`[Groq Rotator] Key index ${currentKeyIndex} hit rate limit or auth error. Rotating key...`);
-        currentKeyIndex = (currentKeyIndex + 1) % groqKeys.length;
-        attempts++;
-      } else {
-        throw error;
-      }
-    }
-  }
-  throw new Error('All Groq API keys have been exhausted or hit rate limits.');
-}
-
+// Health check endpoint for Render
 app.get('/', (req, res) => {
-  res.send('Luna Google Flow Hybrid Engine is active.');
+  res.json({ status: 'online', assistant: 'Luna Web Server is ready!' });
 });
 
-app.post('/api/generate-image', async (req, res) => {
-  const { prompt } = req.body;
-  if (!prompt) {
-    return res.status(400).json({ success: false, error: 'Prompt is required' });
+// Endpoint for Luna to browse/visit a website and read its content
+app.post('/api/browse', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required in the request body.' });
   }
 
-  console.log(`[Google Flow Hybrid] Processing request for prompt: "${prompt}"`);
   let browser;
-  let currentStep = 'Initialization';
-
   try {
+    // Launch headless browser with flags optimized for cloud servers like Render
     browser = await puppeteer.launch({
-      headless: true,
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -82,202 +37,35 @@ app.post('/api/generate-image', async (req, res) => {
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
+    
+    // Set a realistic User-Agent so websites don't block the request
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-    if (!process.env.GOOGLE_COOKIES_JSON) {
-      throw new Error('Security Error: GOOGLE_COOKIES_JSON environment variable is missing.');
-    }
+    // Go to the target URL with a timeout
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    const rawCookies = JSON.parse(process.env.GOOGLE_COOKIES_JSON);
-    const sanitizedCookies = rawCookies.map(cookie => {
-      const cleanCookie = { ...cookie };
-      if (!cleanCookie.partitionKey || cleanCookie.partitionKey === null) delete cleanCookie.partitionKey;
-      if (cleanCookie.storeId === null) delete cleanCookie.storeId;
-      if (cleanCookie.firstPartyDomain === "") delete cleanCookie.firstPartyDomain;
-      if (cleanCookie.sameSite === null) delete cleanCookie.sameSite;
-      return cleanCookie;
+    // Extract title and text content for Luna to analyze
+    const pageData = await page.evaluate(() => {
+      return {
+        title: document.title,
+        text: document.body.innerText.substring(0, 8000), // Limit text size to keep responses fast
+        url: window.location.href
+      };
     });
-
-    await page.setCookie(...sanitizedCookies);
-    console.log('[Google Flow Hybrid] Session cookies loaded successfully.');
-
-    // STEP 1: Open Google Flow
-    currentStep = 'Opening flow.google.com';
-    console.log(`[Google Flow Hybrid] Step 1: ${currentStep}...`);
-    await page.goto('https://flow.google.com', { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 4000));
-
-    // STEP 2: Check workspace / New Project
-    currentStep = 'Checking workspace / New Project';
-    console.log(`[Google Flow Hybrid] Step 2: ${currentStep}...`);
-    const isInputPresent = await page.evaluate(() => {
-      return !!document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
-    });
-
-    if (!isInputPresent) {
-      console.log('[Google Flow Hybrid] Prompt box not active, clicking New Project...');
-      await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, [role="button"], div'));
-        const target = buttons.find(b => {
-          const text = b.innerText?.trim().toLowerCase() || '';
-          const aria = b.getAttribute('aria-label')?.toLowerCase() || '';
-          return text.includes('new') || text.includes('create') || text.includes('+') || aria.includes('new') || aria.includes('create');
-        });
-        if (target) target.click();
-      });
-      await new Promise(r => setTimeout(r, 4000));
-    }
-
-    // STEP 3: Enter Prompt
-    currentStep = 'Entering prompt into input box';
-    console.log(`[Google Flow Hybrid] Step 3: ${currentStep}...`);
-    const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
-    await page.waitForSelector(inputSelector, { timeout: 20000 });
-
-    await page.evaluate((userPrompt) => {
-      const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
-      if (input) {
-        input.focus();
-        if (input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') {
-          input.value = userPrompt;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        } else {
-          input.innerText = userPrompt;
-          input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-        }
-      }
-    }, prompt);
-
-    console.log('[Google Flow Hybrid] Prompt entered successfully.');
-    await new Promise(r => setTimeout(r, 1500));
-
-    // STEP 4: Trigger Generation
-    currentStep = 'Triggering generation button click';
-    console.log(`[Google Flow Hybrid] Step 4: ${currentStep}...`);
-    const clicked = await page.evaluate(() => {
-      const elements = Array.from(document.querySelectorAll('button, [role="button'], div, span'));
-      const genBtn = elements.find(el => {
-        const text = el.innerText?.trim().toLowerCase() || '';
-        const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
-        return text.includes('generate') || text.includes('create') || text.includes('run') || aria.includes('generate') || aria.includes('submit');
-      });
-      if (genBtn) {
-        genBtn.click();
-        return true;
-      }
-      return false;
-    });
-
-    if (!clicked) {
-      console.log('[Google Flow Hybrid] Submit button text match missed. Pressing Enter as fallback...');
-      await page.keyboard.press('Enter');
-    }
-
-    console.log('[Google Flow Hybrid] Generation triggered. Activating network interceptor...');
-
-    // NETWORK INTERCEPTOR
-    let interceptedImageUrl = null;
-    page.on('response', async (response) => {
-      try {
-        const url = response.url();
-        if (url.includes('=s32') || url.includes('=s64') || url.includes('avatar') || url.includes('favicon') || url.includes('logo')) return;
-
-        if ((url.includes('googleusercontent.com') || url.includes('gen_img') || url.endsWith('.png') || url.endsWith('.jpg') || url.endsWith('.webp')) && !url.includes('favicon')) {
-          const contentType = response.headers()['content-type'] || '';
-          if (contentType.includes('image') || url.includes('googleusercontent.com')) {
-            if (!interceptedImageUrl) {
-              interceptedImageUrl = url;
-              console.log('[Google Flow Hybrid] Intercepted generated image URL:', url);
-            }
-          }
-        }
-      } catch (e) {}
-    });
-
-    // STEP 5: Wait for image result
-    currentStep = 'Waiting for image rendering/network stream';
-    console.log(`[Google Flow Hybrid] Step 5: ${currentStep} (up to 120s)...`);
-
-    const startTime = Date.now();
-    while (Date.now() - startTime < 120000) {
-      if (interceptedImageUrl) break;
-
-      const domImgUrl = await page.evaluate(() => {
-        const imgs = document.querySelectorAll('img');
-        for (const img of imgs) {
-          const src = img.src || '';
-          if (src && !src.includes('avatar') && !src.includes('favicon') && !src.includes('=s32') && (img.naturalWidth > 200 || src.includes('googleusercontent'))) {
-            return src;
-          }
-        }
-        return null;
-      });
-
-      if (domImgUrl) {
-        interceptedImageUrl = domImgUrl;
-        break;
-      }
-
-      await new Promise(r => setTimeout(r, 3000));
-    }
-
-    if (!interceptedImageUrl) {
-      throw new Error(`Timed out at step: "${currentStep}". Image URL was not captured.`);
-    }
 
     await browser.close();
-    console.log('[Google Flow Hybrid] Success! Real image URL retrieved.');
-    return res.json({ success: true, imageUrl: interceptedImageUrl });
+    res.json({ success: true, data: pageData });
 
   } catch (error) {
-    console.error(`[Google Flow Error during "${currentStep}"]:`, error.message);
-    
-    // QWEN VISION ERROR DIAGNOSTICIAN (Fires only if something fails)
-    let aiReason = 'Could not generate AI vision diagnostic.';
-    if (browser && groqKeys.length > 0) {
-      try {
-        const pages = await browser.pages();
-        if (pages.length > 0) {
-          const page = pages[0];
-          console.log('[AI Diagnostics] Capturing failure screenshot for Qwen 3.8 Vision analysis...');
-          const screenshotBase64 = await page.screenshot({ encoding: 'base64', fullPage: true });
-
-          aiReason = await callGroqVisionWithRotation([
-            {
-              role: 'system',
-              content: 'You are an expert web automation debugging agent. Analyze this screenshot of the Google Flow interface where an error or timeout occurred. Explain precisely what went wrong.'
-            },
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: `Failed Step: ${currentStep}\nError: ${error.message}` },
-                { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshotBase64}` } }
-              ]
-            }
-          ], { max_tokens: 350 });
-          
-          console.log('\n================ QWEN VISION DIAGNOSTIC REPORT ================\n');
-          console.log(aiReason);
-          console.log('\n================================================================\n');
-        }
-      } catch (diagErr) {
-        aiReason = 'Vision diagnostic capture failed: ' + diagErr.message;
-      }
+    if (browser) {
+      try { await browser.close(); } catch (e) {}
     }
-
-    if (browser) await browser.close();
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message, 
-      failedStep: currentStep,
-      aiDiagnosticReport: aiReason 
-    });
+    console.error('Browsing error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`[Luna Server] Hybrid Engine listening on port ${PORT}`);
+  console.log(`Luna server is running on port ${PORT}`);
 });
-            
+      
