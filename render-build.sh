@@ -2,8 +2,8 @@
 # Exit on error
 set -o errexit
 
-# Install npm dependencies
+# Install Node dependencies
 npm install
 
-# Download Chrome executable for Puppeteer on Render Linux environment
+# Download and install the exact Chrome version Puppeteer needs
 npx puppeteer browsers install chrome
