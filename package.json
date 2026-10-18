@@ -1,15 +1,17 @@
 {
-  "name": "image-generator-luna-bridge",
+  "name": "luna-backend-server",
   "version": "1.0.0",
-  "description": "Google Flow automation bridge for Luna with Puppeteer and Groq/Qwen agent",
+  "description": "Backend server providing web search and browsing capabilities for Luna AI",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "postinstall": "puppeteer browsers install chrome"
+    "start": "node index.js"
   },
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "groq-sdk": "^0.7.0",
-    "puppeteer": "^23.0.0"
+    "puppeteer": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
