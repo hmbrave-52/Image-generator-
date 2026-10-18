@@ -1,0 +1,15 @@
+{
+  "name": "luna-google-flow-bridge",
+  "version": "1.0.0",
+  "description": "Secure Render backend bridge connecting Luna Web AI to Google Flow",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "puppeteer": "^22.12.0"
+  }
+}
