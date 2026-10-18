@@ -7,19 +7,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// --- DYNAMIC GROQ KEY ROTATOR (Parses single JSON secret) ---
+// --- DYNAMIC GROQ KEY ROTATOR ---
 let groqKeys = [];
 try {
-  groqKeys = JSON.parse(process.env.GOOGLE_COOKIES_JSON ? (process.env.GROQ_KEYS_JSON || '[]') : (process.env.GROQ_KEYS_JSON || '[]'));
+  groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON || '[]');
 } catch (e) {
   console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON.');
 }
-
-try {
-  if (groqKeys.length === 0 && process.env.GROQ_KEYS_JSON) {
-    groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON);
-  }
-} catch(e) {}
 
 if (groqKeys.length === 0 && process.env.GROQ_API_KEY) {
   groqKeys.push(process.env.GROQ_API_KEY);
@@ -60,10 +54,9 @@ async function callGroqWithRotation(messages, options = {}) {
   }
   throw new Error('All Groq API keys have been exhausted or hit rate limits.');
 }
-// -----------------------------------------------------------
 
 app.get('/', (req, res) => {
-  res.send('Luna Google Flow Bridge Server with Qwen Vision Diagnostics is active.');
+  res.send('Luna Google Flow Bridge Server with Vision Diagnostics is active.');
 });
 
 app.post('/api/generate-image', async (req, res) => {
@@ -77,20 +70,27 @@ app.post('/api/generate-image', async (req, res) => {
   let currentStep = 'Initialization';
 
   try {
+    // Launch Chrome with flags tailored for Google WebGL/Canvas apps
     browser = await puppeteer.launch({
-      headless: true,
+      headless: 'shell',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu'
+        '--use-gl=angle',
+        '--use-angle=swiftshader',
+        '--enable-webgl',
+        '--window-size=1280,800'
       ]
     });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
+
+    // LOG CAPTURE: Forward page console messages & JS errors straight to Render logs
+    page.on('console', msg => console.log(`[Browser Console]: ${msg.text()}`));
+    page.on('pageerror', err => console.error(`[Browser Page Error]: ${err.message}`));
 
     if (!process.env.GOOGLE_COOKIES_JSON) {
       throw new Error('Security Error: GOOGLE_COOKIES_JSON environment variable is missing.');
@@ -107,7 +107,7 @@ app.post('/api/generate-image', async (req, res) => {
     });
 
     await page.setCookie(...sanitizedCookies);
-    console.log('[Google Flow] Successfully loaded secure session cookies.');
+    console.log('[Google Flow] Loaded session cookies.');
 
     // STEP 1: Open Google Flow
     currentStep = 'Opening flow.google.com';
@@ -117,26 +117,22 @@ app.post('/api/generate-image', async (req, res) => {
     // STEP 2: Check workspace status
     currentStep = 'Checking workspace / New Project';
     console.log(`[Google Flow] Step 2: ${currentStep}...`);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 4000));
     
     const isInputPresent = await page.evaluate(() => {
       return !!document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
     });
 
     if (!isInputPresent) {
-      console.log('[Google Flow] Prompt box not active directly, looking for New Project button...');
-      const clickedNew = await page.evaluate(() => {
+      console.log('[Google Flow] Prompt box not active directly, clicking New Project...');
+      await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button, [role="button"], div'));
         const target = buttons.find(b => {
           const text = b.innerText?.trim().toLowerCase() || '';
           const aria = b.getAttribute('aria-label')?.toLowerCase() || '';
           return text.includes('new') || text.includes('create') || text.includes('+') || aria.includes('new') || aria.includes('create');
         });
-        if (target) {
-          target.click();
-          return true;
-        }
-        return false;
+        if (target) target.click();
       });
       await new Promise(r => setTimeout(r, 4000));
     }
@@ -146,11 +142,7 @@ app.post('/api/generate-image', async (req, res) => {
     console.log(`[Google Flow] Step 3: ${currentStep}...`);
     const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
     
-    try {
-      await page.waitForSelector(inputSelector, { timeout: 15000 });
-    } catch (e) {
-      throw new Error(`Failed to find prompt input box on screen during step: ${currentStep}`);
-    }
+    await page.waitForSelector(inputSelector, { timeout: 20000 });
     
     await page.evaluate((userPrompt) => {
       const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
@@ -200,13 +192,8 @@ app.post('/api/generate-image', async (req, res) => {
     });
 
     if (!clicked) {
-      console.log('[Google Flow] Submit button text match missed. Clicking last button icon as fallback...');
-      await page.evaluate(() => {
-        const buttons = document.querySelectorAll('button, [role="button"]');
-        if (buttons.length > 0) {
-          buttons[buttons.length - 1].click();
-        }
-      });
+      console.log('[Google Flow] Submit button missed. Pressing Enter as fallback...');
+      await page.keyboard.press('Enter');
     }
 
     console.log('[Google Flow] Generation triggered. Activating network interceptor...');
@@ -274,24 +261,21 @@ app.post('/api/generate-image', async (req, res) => {
         const pages = await browser.pages();
         if (pages.length > 0) {
           const page = pages[0];
-          // TAKE SCREENSHOT AS BASE64 FOR QWEN VISION
           console.log('[AI Diagnostics] Capturing browser screenshot for Qwen 3.8 Vision analysis...');
           const screenshotBase64 = await page.screenshot({ encoding: 'base64', fullPage: true });
 
           aiReason = await callGroqWithRotation([
             {
               role: 'system',
-              content: 'You are an expert web automation debugging agent with vision capabilities. Analyze this screenshot of the stuck Google Flow browser interface. Identify any visual errors, popups, blank spaces, stuck loading states, or reason why image generation did not finish.'
+              content: 'You are an expert web automation debugging agent with vision capabilities. Analyze this screenshot of the Google Flow interface. Identify any visual errors, popups, blank spaces, stuck loading states, or reasons why image generation did not finish.'
             },
             {
               role: 'user',
               content: [
-                { type: 'text', text: `Failed Step: ${currentStep}\nError: ${error.message}\nAnalyze the attached screenshot of the current page state to find out why it got stuck:` },
+                { type: 'text', text: `Failed Step: ${currentStep}\nError: ${error.message}` },
                 {
                   type: 'image_url',
-                  image_url: {
-                    url: `data:image/png;base64,${screenshotBase64}`
-                  }
+                  image_url: { url: `data:image/png;base64,${screenshotBase64}` }
                 }
               ]
             }
@@ -303,7 +287,6 @@ app.post('/api/generate-image', async (req, res) => {
         }
       } catch (diagErr) {
         aiReason = 'Vision diagnostic capture failed: ' + diagErr.message;
-        console.error('[AI Diagnostics Error]:', diagErr.message);
       }
     }
 
@@ -320,4 +303,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-  
+          
