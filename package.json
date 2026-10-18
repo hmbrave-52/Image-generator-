@@ -4,7 +4,8 @@
   "description": "Google Flow automation bridge for Luna with Puppeteer and Groq/Qwen agent",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "puppeteer browsers install chrome"
   },
   "dependencies": {
     "express": "^4.19.2",
