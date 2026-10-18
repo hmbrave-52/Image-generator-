@@ -155,9 +155,44 @@ app.post('/api/generate-image', async (req, res) => {
 
     await new Promise(r => setTimeout(r, 1000));
 
-    // STEP 5: Trigger generation
+    // STEP 5: Trigger generation (Explicitly find and click the submit/generate button)
     console.log('[Google Flow] Triggering generation...');
-    await page.keyboard.press('Enter');
+    const clicked = await page.evaluate(() => {
+      const elements = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
+      const genBtn = elements.find(el => {
+        const text = el.innerText?.trim().toLowerCase() || '';
+        const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
+        const testId = el.getAttribute('data-testid')?.toLowerCase() || '';
+        
+        return text.includes('generate') || 
+               text.includes('create') || 
+               text.includes('run') ||
+               aria.includes('generate') || 
+               aria.includes('create') || 
+               aria.includes('send') ||
+               aria.includes('submit') ||
+               testId.includes('submit') ||
+               testId.includes('generate');
+      });
+
+      if (genBtn) {
+        genBtn.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!clicked) {
+      console.log('[Google Flow] Submit button not found via text, attempting to click the submit icon/arrow near input...');
+      // Fallback: Click the last button element or icon inside the input area layout
+      await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        if (buttons.length > 0) {
+          // Click the last button on the page, which is usually the submit arrow
+          buttons[buttons.length - 1].click();
+        }
+      });
+    }
 
     // NETWORK INTERCEPTOR
     let interceptedImageUrl = null;
@@ -246,4 +281,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-    
+                                                
