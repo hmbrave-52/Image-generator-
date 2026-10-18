@@ -35,27 +35,6 @@ app.post('/api/generate-image', async (req, res) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
-    // NETWORK INTERCEPTION: Catch image URLs the moment they load from Google's servers
-    let interceptedImageUrl = null;
-    page.on('response', async (response) => {
-      try {
-        const url = response.url();
-        // Check if the URL points to a generated image asset
-        if ((url.includes('googleusercontent.com') || url.includes('gen_img') || url.endsWith('.png') || url.endsWith('.jpg') || url.endsWith('.webp')) &&
-            !url.includes('favicon') && !url.includes('avatar') && !url.includes('logo')) {
-          const contentType = response.headers()['content-type'] || '';
-          if (contentType.includes('image') || url.includes('googleusercontent.com')) {
-            if (!interceptedImageUrl) {
-              interceptedImageUrl = url;
-              console.log('[Google Flow] Intercepted image URL from network:', url);
-            }
-          }
-        }
-      } catch (e) {
-        // Ignore response parsing errors to keep things smooth
-      }
-    });
-
     // SAFETY CHECK: Load cookies strictly from Render private environment variable
     if (!process.env.GOOGLE_COOKIES_JSON) {
       throw new Error('Security Error: GOOGLE_COOKIES_JSON environment variable is missing.');
@@ -170,22 +149,44 @@ app.post('/api/generate-image', async (req, res) => {
       await page.keyboard.press('Enter');
     }
 
-    console.log('[Google Flow] Generation triggered. Waiting for network image response (up to 150s)...');
+    console.log('[Google Flow] Generation triggered. Activating network interceptor for final render...');
 
-    // STEP 6: Wait for the network interceptor or DOM fallback to capture the image URL
+    // NETWORK INTERCEPTOR: Started AFTER generation so it ignores profile avatars entirely
+    let interceptedImageUrl = null;
+    page.on('response', async (response) => {
+      try {
+        const url = response.url();
+        // Ignore account icons, profile pictures, and small thumbnails (=s32, =s64, avatars)
+        if (url.includes('=s32') || url.includes('=s64') || url.includes('avatar') || url.includes('favicon') || url.includes('logo')) {
+          return;
+        }
+
+        if ((url.includes('googleusercontent.com') || url.includes('gen_img') || url.endsWith('.png') || url.endsWith('.jpg') || url.endsWith('.webp')) &&
+            !url.includes('favicon')) {
+          const contentType = response.headers()['content-type'] || '';
+          if (contentType.includes('image') || url.includes('googleusercontent.com')) {
+            if (!interceptedImageUrl) {
+              interceptedImageUrl = url;
+              console.log('[Google Flow] Intercepted real generated image URL:', url);
+            }
+          }
+        }
+      } catch (e) {}
+    });
+
+    // STEP 6: Wait for the network interceptor or DOM to catch the actual generated image (up to 150s)
     const startTime = Date.now();
     while (Date.now() - startTime < 150000) {
-      // Check if network interceptor caught it
       if (interceptedImageUrl) {
         break;
       }
 
-      // DOM Fallback check (checking standard imgs)
+      // Fallback DOM check for large images only
       const domImgUrl = await page.evaluate(() => {
         const imgs = document.querySelectorAll('img');
         for (const img of imgs) {
           const src = img.src || '';
-          if (src && !src.includes('favicon') && !src.includes('avatar') && (img.naturalWidth > 150 || src.includes('googleusercontent'))) {
+          if (src && !src.includes('avatar') && !src.includes('favicon') && !src.includes('=s32') && (img.naturalWidth > 200 || src.includes('googleusercontent'))) {
             return src;
           }
         }
@@ -197,16 +198,16 @@ app.post('/api/generate-image', async (req, res) => {
         break;
       }
 
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
     }
 
     await browser.close();
 
     if (!interceptedImageUrl) {
-      throw new Error('Image generation timed out or image URL could not be captured from network/DOM.');
+      throw new Error('Image generation timed out or image URL could not be captured.');
     }
 
-    console.log('[Google Flow] Success! Image URL retrieved.');
+    console.log('[Google Flow] Success! Real image URL retrieved.');
     return res.json({ success: true, imageUrl: interceptedImageUrl });
 
   } catch (error) {
@@ -219,4 +220,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-  
+      
