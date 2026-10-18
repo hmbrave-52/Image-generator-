@@ -15,7 +15,6 @@ try {
   console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON. Ensure it is a valid JSON array.');
 }
 
-// Fallback to single key if JSON parsing fails or isn't used
 if (groqKeys.length === 0 && process.env.GROQ_API_KEY) {
   groqKeys.push(process.env.GROQ_API_KEY);
 }
@@ -200,7 +199,6 @@ app.post('/api/generate-image', async (req, res) => {
         break;
       }
 
-      await new Response?.();
       await new Promise(r => setTimeout(r, 3000));
     }
 
@@ -208,12 +206,11 @@ app.post('/api/generate-image', async (req, res) => {
     if (!interceptedImageUrl) {
       console.warn('[AI Diagnostics] Image generation timed out. Asking Qwen agent to analyze page state...');
       
-      // Grab current page state, text snippets, and visible error hints for the agent
       const pageDiagnostics = await page.evaluate(() => {
         return {
           title: document.title,
           currentUrl: window.location.href,
-          visibleText: document.body.innerText.slice(0, 1500), // first 1500 chars of page
+          visibleText: document.body.innerText.slice(0, 1500),
           hasCaptcha: document.body.innerText.toLowerCase().includes('captcha') || document.body.innerText.toLowerCase().includes('verify'),
           hasError: document.body.innerText.toLowerCase().includes('error') || document.body.innerText.toLowerCase().includes('failed')
         };
@@ -249,4 +246,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-        
+    
