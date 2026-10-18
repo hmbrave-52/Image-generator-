@@ -149,18 +149,47 @@ app.post('/api/generate-image', async (req, res) => {
       await page.keyboard.press('Enter');
     }
 
-    console.log('[Google Flow] Generation triggered. Waiting for image result...');
+    console.log('[Google Flow] Generation triggered. Waiting for image result (Multi-strategy scan)...');
 
-    // STEP 6: Wait for generated image URL to appear in DOM
+    // STEP 6: Robust multi-strategy image extractor (up to 150 seconds)
     const imageUrl = await page.evaluate(async () => {
       const startTime = Date.now();
-      while (Date.now() - startTime < 60000) { // Wait up to 60 seconds
+      while (Date.now() - startTime < 150000) {
+        
+        // Strategy A: Check standard <img> tags
         const allImgs = Array.from(document.querySelectorAll('img'));
-        const generatedImg = allImgs.find(i => i.src && i.naturalWidth > 200);
-        if (generatedImg) {
-          return generatedImg.src;
+        const foundImg = allImgs.find(i => {
+          const src = i.src || '';
+          return (src.includes('googleusercontent') || src.startsWith('blob:') || src.startsWith('http')) && 
+                 !src.includes('favicon') && 
+                 !src.includes('avatar') &&
+                 (i.naturalWidth > 100 || i.width > 100);
+        });
+        if (foundImg) return foundImg.src;
+
+        // Strategy B: Check elements with background-image styles
+        const allElements = Array.from(document.querySelectorAll('*'));
+        for (const el of allElements) {
+          const bg = window.getComputedStyle(el).backgroundImage;
+          if (bg && bg.includes('url(')) {
+            const match = bg.match(/url\(['"]?(.*?)['"]?\)/);
+            if (match && match[1] && (match[1].startsWith('http') || match[1].startsWith('blob:'))) {
+              if (!match[1].includes('favicon')) {
+                return match[1];
+              }
+            }
+          }
         }
-        await new Promise(r => setTimeout(r, 2000));
+
+        // Strategy C: Check download or preview anchor links pointing to images
+        const links = Array.from(document.querySelectorAll('a[href]'));
+        const imgLink = links.find(a => {
+          const href = a.href || '';
+          return href.includes('googleusercontent') || href.endsWith('.png') || href.endsWith('.jpg') || href.endsWith('.webp');
+        });
+        if (imgLink) return imgLink.href;
+
+        await new Promise(r => setTimeout(r, 3000));
       }
       return null;
     });
@@ -184,4 +213,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-        
+      
