@@ -70,17 +70,15 @@ app.post('/api/generate-image', async (req, res) => {
   let currentStep = 'Initialization';
 
   try {
-    // Launch Chrome with flags tailored for Google WebGL/Canvas apps
+    // Standard headless mode matching downloaded Chrome binary
     browser = await puppeteer.launch({
-      headless: 'shell',
+      headless: true,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--use-gl=angle',
-        '--use-angle=swiftshader',
-        '--enable-webgl',
-        '--window-size=1280,800'
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
       ]
     });
 
@@ -303,4 +301,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-          
+      
