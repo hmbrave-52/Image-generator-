@@ -10,10 +10,17 @@ const PORT = process.env.PORT || 10000;
 // --- DYNAMIC GROQ KEY ROTATOR (Parses single JSON secret) ---
 let groqKeys = [];
 try {
-  groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON || '[]');
+  groqKeys = JSON.parse(process.env.GOOGLE_COOKIES_JSON ? (process.env.GROQ_KEYS_JSON || '[]') : (process.env.GROQ_KEYS_JSON || '[]'));
 } catch (e) {
-  console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON. Ensure it is a valid JSON array.');
+  console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON.');
 }
+
+// Fallback loader if stored differently
+try {
+  if (groqKeys.length === 0 && process.env.GROQ_KEYS_JSON) {
+    groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON);
+  }
+} catch(e) {}
 
 if (groqKeys.length === 0 && process.env.GROQ_API_KEY) {
   groqKeys.push(process.env.GROQ_API_KEY);
@@ -57,7 +64,7 @@ async function callGroqWithRotation(messages, options = {}) {
 // -----------------------------------------------------------
 
 app.get('/', (req, res) => {
-  res.send('Luna Google Flow Bridge Server with Qwen Diagnostics is active.');
+  res.send('Luna Google Flow Bridge Server with Instant Diagnostics is active.');
 });
 
 app.post('/api/generate-image', async (req, res) => {
@@ -68,6 +75,8 @@ app.post('/api/generate-image', async (req, res) => {
 
   console.log(`[Google Flow] Processing request for prompt: "${prompt}"`);
   let browser;
+  let currentStep = 'Initialization';
+
   try {
     browser = await puppeteer.launch({
       headless: true,
@@ -102,41 +111,51 @@ app.post('/api/generate-image', async (req, res) => {
     console.log('[Google Flow] Successfully loaded secure session cookies.');
 
     // STEP 1: Open Google Flow
-    console.log('[Google Flow] Opening flow.google.com...');
+    currentStep = 'Opening flow.google.com';
+    console.log(`[Google Flow] Step 1: ${currentStep}...`);
     await page.goto('https://flow.google.com', { waitUntil: 'networkidle2', timeout: 60000 });
 
     // STEP 2: Check workspace status
+    currentStep = 'Checking workspace / New Project';
+    console.log(`[Google Flow] Step 2: ${currentStep}...`);
     await new Promise(r => setTimeout(r, 3000));
+    
     const isInputPresent = await page.evaluate(() => {
       return !!document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
     });
 
     if (!isInputPresent) {
-      console.log('[Google Flow] Prompt box not active, clicking New Project...');
-      await page.evaluate(() => {
+      console.log('[Google Flow] Prompt box not active directly, looking for New Project button...');
+      const clickedNew = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button, [role="button"], div'));
         const target = buttons.find(b => {
           const text = b.innerText?.trim().toLowerCase() || '';
           const aria = b.getAttribute('aria-label')?.toLowerCase() || '';
           return text.includes('new') || text.includes('create') || text.includes('+') || aria.includes('new') || aria.includes('create');
         });
-        if (target) target.click();
+        if (target) {
+          target.click();
+          return true;
+        }
+        return false;
       });
+      if (!clickedNew) {
+        console.warn('[Warning] Could not find explicit "New Project" button, attempting to proceed anyway...');
+      }
       await new Promise(r => setTimeout(r, 4000));
     }
 
-    // STEP 3: Select model if available
-    await page.evaluate(() => {
-      const elements = Array.from(document.querySelectorAll('*'));
-      const modelEl = elements.find(el => el.innerText && (el.innerText.includes('Nano Banana') || el.innerText.includes('Model')));
-      if (modelEl) modelEl.click();
-    });
-    await new Promise(r => setTimeout(r, 1000));
-
-    // STEP 4: Enter prompt
-    console.log('[Google Flow] Entering prompt...');
+    // STEP 3: Enter prompt
+    currentStep = 'Entering prompt into input box';
+    console.log(`[Google Flow] Step 3: ${currentStep}...`);
     const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
-    await page.waitForSelector(inputSelector, { timeout: 15000 });
+    
+    // Wait for input with explicit error check
+    try {
+      await page.waitForSelector(inputSelector, { timeout: 15000 });
+    } catch (e) {
+      throw new Error(`Failed to find prompt input box on screen during step: ${currentStep}`);
+    }
     
     await page.evaluate((userPrompt) => {
       const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
@@ -153,10 +172,13 @@ app.post('/api/generate-image', async (req, res) => {
       }
     }, prompt);
 
+    console.log('[Google Flow] Prompt entered successfully.');
     await new Promise(r => setTimeout(r, 1000));
 
-    // STEP 5: Trigger generation (Explicitly find and click the submit/generate button)
-    console.log('[Google Flow] Triggering generation...');
+    // STEP 4: Trigger generation
+    currentStep = 'Triggering generation button click';
+    console.log(`[Google Flow] Step 4: ${currentStep}...`);
+    
     const clicked = await page.evaluate(() => {
       const elements = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
       const genBtn = elements.find(el => {
@@ -183,16 +205,16 @@ app.post('/api/generate-image', async (req, res) => {
     });
 
     if (!clicked) {
-      console.log('[Google Flow] Submit button not found via text, attempting to click the submit icon/arrow near input...');
-      // Fallback: Click the last button element or icon inside the input area layout
+      console.log('[Google Flow] Submit button text match missed. Clicking last button icon as fallback...');
       await page.evaluate(() => {
-        const buttons = document.querySelectorAll('button');
+        const buttons = document.querySelectorAll('button, [role="button"]');
         if (buttons.length > 0) {
-          // Click the last button on the page, which is usually the submit arrow
           buttons[buttons.length - 1].click();
         }
       });
     }
+
+    console.log('[Google Flow] Generation triggered. Activating network interceptor...');
 
     // NETWORK INTERCEPTOR
     let interceptedImageUrl = null;
@@ -213,9 +235,12 @@ app.post('/api/generate-image', async (req, res) => {
       } catch (e) {}
     });
 
-    // STEP 6: Wait for image result
+    // STEP 5: Wait for image result
+    currentStep = 'Waiting for image rendering/network stream';
+    console.log(`[Google Flow] Step 5: ${currentStep} (up to 120s)...`);
+    
     const startTime = Date.now();
-    while (Date.now() - startTime < 150000) {
+    while (Date.now() - startTime < 120000) {
       if (interceptedImageUrl) break;
 
       const domImgUrl = await page.evaluate(() => {
@@ -237,34 +262,8 @@ app.post('/api/generate-image', async (req, res) => {
       await new Promise(r => setTimeout(r, 3000));
     }
 
-    // --- AI ERROR DIAGNOSTICIAN IF IT STICKS ---
     if (!interceptedImageUrl) {
-      console.warn('[AI Diagnostics] Image generation timed out. Asking Qwen agent to analyze page state...');
-      
-      const pageDiagnostics = await page.evaluate(() => {
-        return {
-          title: document.title,
-          currentUrl: window.location.href,
-          visibleText: document.body.innerText.slice(0, 1500),
-          hasCaptcha: document.body.innerText.toLowerCase().includes('captcha') || document.body.innerText.toLowerCase().includes('verify'),
-          hasError: document.body.innerText.toLowerCase().includes('error') || document.body.innerText.toLowerCase().includes('failed')
-        };
-      });
-
-      let aiReason = 'Unknown timeout reason.';
-      if (groqKeys.length > 0) {
-        try {
-          aiReason = await callGroqWithRotation([
-            { role: 'system', content: 'You are an expert web automation debugging agent. Analyze the provided Google Flow browser state and explain why the image generation got stuck or failed.' },
-            { role: 'user', content: `Page diagnostics: ${JSON.stringify(pageDiagnostics)}` }
-          ], { max_tokens: 200 });
-        } catch (err) {
-          aiReason = 'AI diagnostic failed to execute: ' + err.message;
-        }
-      }
-
-      await browser.close();
-      throw new Error(`Generation stuck / timed out. AI Diagnostic Report: ${aiReason}`);
+      throw new Error(`Timed out at step: "${currentStep}". Image URL was not captured.`);
     }
 
     await browser.close();
@@ -272,13 +271,43 @@ app.post('/api/generate-image', async (req, res) => {
     return res.json({ success: true, imageUrl: interceptedImageUrl });
 
   } catch (error) {
+    console.error(`[Google Flow Error during "${currentStep}"]:`, error.message);
+    
+    let aiReason = 'Could not generate AI diagnostic.';
+    if (browser && groqKeys.length > 0) {
+      try {
+        const page = (await browser.pages())[0];
+        if (page) {
+          const pageDiagnostics = await page.evaluate(() => {
+            return {
+              title: document.title,
+              currentUrl: window.location.href,
+              visibleText: document.body.innerText.slice(0, 1200),
+              buttons: Array.from(document.querySelectorAll('button, [role="button"]')).map(b => b.innerText?.trim()).filter(Boolean).slice(0, 15)
+            };
+          });
+
+          aiReason = await callGroqWithRotation([
+            { role: 'system', content: 'You are an expert web automation debugging agent. Look at the failed step and page diagnostics to explain precisely what went wrong on Google Flow.' },
+            { role: 'user', content: `Failed Step: ${currentStep}\nError: ${error.message}\nDiagnostics: ${JSON.stringify(pageDiagnostics)}` }
+          ], { max_tokens: 250 });
+        }
+      } catch (diagErr) {
+        aiReason = 'Diagnostic capture failed: ' + diagErr.message;
+      }
+    }
+
     if (browser) await browser.close();
-    console.error('[Google Flow Error]:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message, 
+      failedStep: currentStep,
+      aiDiagnosticReport: aiReason 
+    });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-                                                
+        
