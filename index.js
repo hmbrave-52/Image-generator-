@@ -7,7 +7,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// --- DYNAMIC GROQ KEY ROTATOR ---
+// --- DYNAMIC GROQ KEY ROTATOR (Parses single JSON secret) ---
 let groqKeys = [];
 try {
   groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON || '[]');
@@ -30,7 +30,7 @@ function getGroqClient() {
   return new Groq({ apiKey: groqKeys[currentKeyIndex] });
 }
 
-async function callGroqWithRotation(messages, options = {}) {
+async function callGroqVisionWithRotation(messages, options = {}) {
   let attempts = 0;
   while (attempts < groqKeys.length) {
     try {
@@ -56,7 +56,7 @@ async function callGroqWithRotation(messages, options = {}) {
 }
 
 app.get('/', (req, res) => {
-  res.send('Luna Google Flow Bridge Server with Vision Diagnostics is active.');
+  res.send('Luna Google Flow Real-Time Vision Agent Bridge is active.');
 });
 
 app.post('/api/generate-image', async (req, res) => {
@@ -65,12 +65,10 @@ app.post('/api/generate-image', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Prompt is required' });
   }
 
-  console.log(`[Google Flow] Processing request for prompt: "${prompt}"`);
+  console.log(`[Google Flow Agent] Starting vision-driven session for prompt: "${prompt}"`);
   let browser;
-  let currentStep = 'Initialization';
 
   try {
-    // Standard headless mode matching downloaded Chrome binary
     browser = await puppeteer.launch({
       headless: true,
       args: [
@@ -86,9 +84,8 @@ app.post('/api/generate-image', async (req, res) => {
     await page.setViewport({ width: 1280, height: 800 });
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
 
-    // LOG CAPTURE: Forward page console messages & JS errors straight to Render logs
+    // Forward console logs for transparency
     page.on('console', msg => console.log(`[Browser Console]: ${msg.text()}`));
-    page.on('pageerror', err => console.error(`[Browser Page Error]: ${err.message}`));
 
     if (!process.env.GOOGLE_COOKIES_JSON) {
       throw new Error('Security Error: GOOGLE_COOKIES_JSON environment variable is missing.');
@@ -105,98 +102,14 @@ app.post('/api/generate-image', async (req, res) => {
     });
 
     await page.setCookie(...sanitizedCookies);
-    console.log('[Google Flow] Loaded session cookies.');
+    console.log('[Google Flow Agent] Successfully loaded session cookies.');
 
     // STEP 1: Open Google Flow
-    currentStep = 'Opening flow.google.com';
-    console.log(`[Google Flow] Step 1: ${currentStep}...`);
+    console.log('[Google Flow Agent] Opening flow.google.com...');
     await page.goto('https://flow.google.com', { waitUntil: 'networkidle2', timeout: 60000 });
-
-    // STEP 2: Check workspace status
-    currentStep = 'Checking workspace / New Project';
-    console.log(`[Google Flow] Step 2: ${currentStep}...`);
     await new Promise(r => setTimeout(r, 4000));
-    
-    const isInputPresent = await page.evaluate(() => {
-      return !!document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
-    });
 
-    if (!isInputPresent) {
-      console.log('[Google Flow] Prompt box not active directly, clicking New Project...');
-      await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, [role="button"], div'));
-        const target = buttons.find(b => {
-          const text = b.innerText?.trim().toLowerCase() || '';
-          const aria = b.getAttribute('aria-label')?.toLowerCase() || '';
-          return text.includes('new') || text.includes('create') || text.includes('+') || aria.includes('new') || aria.includes('create');
-        });
-        if (target) target.click();
-      });
-      await new Promise(r => setTimeout(r, 4000));
-    }
-
-    // STEP 3: Enter prompt
-    currentStep = 'Entering prompt into input box';
-    console.log(`[Google Flow] Step 3: ${currentStep}...`);
-    const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
-    
-    await page.waitForSelector(inputSelector, { timeout: 20000 });
-    
-    await page.evaluate((userPrompt) => {
-      const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
-      if (input) {
-        input.focus();
-        if (input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') {
-          input.value = userPrompt;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        } else {
-          input.innerText = userPrompt;
-          input.dispatchEvent(new InputEvent('input', { bubbles: true }));
-        }
-      }
-    }, prompt);
-
-    console.log('[Google Flow] Prompt entered successfully.');
-    await new Promise(r => setTimeout(r, 1000));
-
-    // STEP 4: Trigger generation
-    currentStep = 'Triggering generation button click';
-    console.log(`[Google Flow] Step 4: ${currentStep}...`);
-    
-    const clicked = await page.evaluate(() => {
-      const elements = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
-      const genBtn = elements.find(el => {
-        const text = el.innerText?.trim().toLowerCase() || '';
-        const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
-        const testId = el.getAttribute('data-testid')?.toLowerCase() || '';
-        
-        return text.includes('generate') || 
-               text.includes('create') || 
-               text.includes('run') ||
-               aria.includes('generate') || 
-               aria.includes('create') || 
-               aria.includes('send') ||
-               aria.includes('submit') ||
-               testId.includes('submit') ||
-               testId.includes('generate');
-      });
-
-      if (genBtn) {
-        genBtn.click();
-        return true;
-      }
-      return false;
-    });
-
-    if (!clicked) {
-      console.log('[Google Flow] Submit button missed. Pressing Enter as fallback...');
-      await page.keyboard.press('Enter');
-    }
-
-    console.log('[Google Flow] Generation triggered. Activating network interceptor...');
-
-    // NETWORK INTERCEPTOR
+    // NETWORK INTERCEPTOR (Listens for generated image in background)
     let interceptedImageUrl = null;
     page.on('response', async (response) => {
       try {
@@ -208,19 +121,112 @@ app.post('/api/generate-image', async (req, res) => {
           if (contentType.includes('image') || url.includes('googleusercontent.com')) {
             if (!interceptedImageUrl) {
               interceptedImageUrl = url;
-              console.log('[Google Flow] Intercepted generated image URL:', url);
+              console.log('[Google Flow Agent] Intercepted generated image URL:', url);
             }
           }
         }
       } catch (e) {}
     });
 
-    // STEP 5: Wait for image result
-    currentStep = 'Waiting for image rendering/network stream';
-    console.log(`[Google Flow] Step 5: ${currentStep} (up to 120s)...`);
-    
+    // STEP 2: REAL-TIME VISION AGENT INTERACTION LOOP
+    let agentTurns = 0;
+    let promptTyped = false;
+    let generationTriggered = false;
+
+    while (agentTurns < 5 && !interceptedImageUrl) {
+      agentTurns++;
+      console.log(`\n--- [Vision Agent Turn ${agentTurns}/5] Inspecting screen ---`);
+
+      const screenshotBase64 = await page.screenshot({ encoding: 'base64' });
+
+      const visionResponseText = await callGroqVisionWithRotation([
+        {
+          role: 'system',
+          content: `You are an expert AI browser automation agent controlling Google Flow. Look at the attached screenshot of the webpage. Your goal is to enter the user's prompt ("${prompt}") and trigger image generation.
+Analyze what you see and respond with a JSON object ONLY (no markdown backticks, raw JSON only) containing your next action:
+- If you see a "New Project" or "+ Create" button that needs to be clicked first, respond with: {"action": "click_text", "target": "New"}
+- If you see a text box / textarea where prompts are entered, respond with: {"action": "type_prompt", "text": "${prompt}"}
+- If the prompt is entered and you see a generate/submit button (arrow, play icon, or generate button), respond with: {"action": "click_generate"}
+- If generation is already running (loading animation or waiting state), respond with: {"action": "wait"}`
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: `Current status - Prompt typed: ${promptTyped}, Generation triggered: ${generationTriggered}. What is your next action based on this screenshot?` },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshotBase64}` } }
+          ]
+        }
+      ], { max_tokens: 150 });
+
+      console.log('[Vision Agent Decision]:', visionResponseText);
+
+      // Parse JSON safely
+      let agentAction = { action: 'wait' };
+      try {
+        const cleanJson = visionResponseText.replace(/```json/g, '').replace(/```/g, '').trim();
+        agentAction = JSON.parse(cleanJson);
+      } catch (parseErr) {
+        console.warn('[Vision Agent] Failed to parse agent JSON, defaulting to wait/fallback action.');
+      }
+
+      // Execute Agent Action in Browser
+      if (agentAction.action === 'click_text') {
+        console.log(`[Agent Action] Clicking element containing text: "${agentAction.target}"`);
+        await page.evaluate((targetText) => {
+          const els = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
+          const found = els.find(el => el.innerText?.trim().toLowerCase().includes(targetText.toLowerCase()));
+          if (found) found.click();
+        }, agentAction.target || 'New');
+        await new Promise(r => setTimeout(r, 4000));
+
+      } else if (agentAction.action === 'type_prompt') {
+        console.log(`[Agent Action] Typing prompt into input field...`);
+        await page.evaluate((userPrompt) => {
+          const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
+          if (input) {
+            input.focus();
+            if (input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') {
+              input.value = userPrompt;
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            } else {
+              input.innerText = userPrompt;
+              input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+            }
+          }
+        }, prompt);
+        promptTyped = true;
+        await new Promise(r => setTimeout(r, 2000));
+
+      } else if (agentAction.action === 'click_generate') {
+        console.log(`[Agent Action] Triggering generation button...`);
+        await page.evaluate(() => {
+          const elements = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
+          const genBtn = elements.find(el => {
+            const text = el.innerText?.trim().toLowerCase() || '';
+            const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
+            return text.includes('generate') || text.includes('create') || text.includes('run') || aria.includes('generate') || aria.includes('submit');
+          });
+          if (genBtn) {
+            genBtn.click();
+          } else {
+            const buttons = document.querySelectorAll('button, [role="button"]');
+            if (buttons.length > 0) buttons[buttons.length - 1].click();
+          }
+        });
+        generationTriggered = true;
+        console.log('[Google Flow Agent] Generation triggered. Waiting for image stream...');
+        break; // Exit setup loop and enter image waiting phase
+
+      } else {
+        console.log('[Agent Action] Waiting or observing state...');
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+
+    // STEP 3: Wait for Image Result Stream (up to 90s)
     const startTime = Date.now();
-    while (Date.now() - startTime < 120000) {
+    while (Date.now() - startTime < 90000) {
       if (interceptedImageUrl) break;
 
       const domImgUrl = await page.evaluate(() => {
@@ -243,62 +249,27 @@ app.post('/api/generate-image', async (req, res) => {
     }
 
     if (!interceptedImageUrl) {
-      throw new Error(`Timed out at step: "${currentStep}". Image URL was not captured.`);
+      // Final Vision Post-Mortem Diagnosis
+      const finalScreenshot = await page.screenshot({ encoding: 'base64' });
+      const finalDiag = await callGroqVisionWithRotation([
+        { role: 'system', content: 'You are a debugging agent. Analyze why this Google Flow screenshot failed to produce an image after generation.' },
+        { role: 'user', content: [{ type: 'text', text: 'Why did this generation time out?' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${finalScreenshot}` } }] }
+      ]);
+      throw new Error(`Generation timed out. Vision Diagnostic: ${finalDiag}`);
     }
 
     await browser.close();
-    console.log('[Google Flow] Success! Real image URL retrieved.');
+    console.log('[Google Flow Agent] Success! Image URL retrieved.');
     return res.json({ success: true, imageUrl: interceptedImageUrl });
 
   } catch (error) {
-    console.error(`[Google Flow Error during "${currentStep}"]:`, error.message);
-    
-    let aiReason = 'Could not generate AI vision diagnostic.';
-    if (browser && groqKeys.length > 0) {
-      try {
-        const pages = await browser.pages();
-        if (pages.length > 0) {
-          const page = pages[0];
-          console.log('[AI Diagnostics] Capturing browser screenshot for Qwen 3.8 Vision analysis...');
-          const screenshotBase64 = await page.screenshot({ encoding: 'base64', fullPage: true });
-
-          aiReason = await callGroqWithRotation([
-            {
-              role: 'system',
-              content: 'You are an expert web automation debugging agent with vision capabilities. Analyze this screenshot of the Google Flow interface. Identify any visual errors, popups, blank spaces, stuck loading states, or reasons why image generation did not finish.'
-            },
-            {
-              role: 'user',
-              content: [
-                { type: 'text', text: `Failed Step: ${currentStep}\nError: ${error.message}` },
-                {
-                  type: 'image_url',
-                  image_url: { url: `data:image/png;base64,${screenshotBase64}` }
-                }
-              ]
-            }
-          ], { max_tokens: 350 });
-          
-          console.log('\n================ QWEN VISION DIAGNOSTIC REPORT ================\n');
-          console.log(aiReason);
-          console.log('\n================================================================\n');
-        }
-      } catch (diagErr) {
-        aiReason = 'Vision diagnostic capture failed: ' + diagErr.message;
-      }
-    }
-
+    console.error('[Google Flow Agent Error]:', error.message);
     if (browser) await browser.close();
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message, 
-      failedStep: currentStep,
-      aiDiagnosticReport: aiReason 
-    });
+    return res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`[Luna Server] Listening on port ${PORT}`);
+  console.log(`[Luna Server] Real-Time Vision Agent listening on port ${PORT}`);
 });
-      
+        
