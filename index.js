@@ -1,47 +1,37 @@
 const express = require('express');
-const cors = require('cors');
 const puppeteer = require('puppeteer');
-require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Enable CORS for Luna AI Web App frontend calls
-app.use(cors({
-  origin: '*', 
-  methods: ['GET', 'POST']
-}));
-
 app.use(express.json());
 
-// SAFETY CHECK: Warn immediately on startup if cookies are missing from environment variables
-if (!process.env.GOOGLE_COOKIES_JSON) {
-  console.warn('[SECURITY WARNING] GOOGLE_COOKIES_JSON is missing! Ensure it is set securely in your Render Environment Variables.');
-}
+const PORT = process.env.PORT || 10000;
 
-/**
- * Automates Google Flow securely using environment-injected cookies:
- * - Auto-clicks new project
- * - Selects Nano Banana 2.1 (falls back to Pro on error)
- * - Types prompt and retrieves image
- */
-async function generateImageViaGoogleFlow(promptText) {
-  console.log(`[Google Flow] Processing request for prompt: "${promptText}"`);
-  
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu'
-    ]
-  });
+// Health check endpoint for GET requests
+app.get('/', (req, res) => {
+  res.send('Luna Google Flow Bridge Server is active.');
+});
 
+app.post('/api/generate-image', async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) {
+    return res.status(400).json({ success: false, error: 'Prompt is required' });
+  }
+
+  console.log(`[Google Flow] Processing request for prompt: "${prompt}"`);
+  let browser;
   try {
+    // Launch Puppeteer in headless mode with Render-compatible flags
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
+      ]
+    });
+
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
@@ -49,99 +39,104 @@ async function generateImageViaGoogleFlow(promptText) {
     if (!process.env.GOOGLE_COOKIES_JSON) {
       throw new Error('Security Error: GOOGLE_COOKIES_JSON environment variable is missing.');
     }
-    
-    const cookies = JSON.parse(process.env.GOOGLE_COOKIES_JSON);
-    await page.setCookie(...cookies);
-    console.log('[Google Flow] Successfully loaded secure session cookies.');
 
-    // Navigate to Google Flow
-    console.log('[Google Flow] Opening flow.google.com...');
-    await page.goto('https://flow.google.com/', {
-      waitUntil: 'networkidle2',
-      timeout: 60000
+    const rawCookies = JSON.parse(process.env.GOOGLE_COOKIES_JSON);
+
+    // Clean cookies to remove null partitionKeys and incompatible attributes (fixes CDP serialization error)
+    const sanitizedCookies = rawCookies.map(cookie => {
+      const cleanCookie = { ...cookie };
+      if (!cleanCookie.partitionKey || cleanCookie.partitionKey === null) {
+        delete cleanCookie.partitionKey;
+      }
+      if (cleanCookie.storeId === null) delete cleanCookie.storeId;
+      if (cleanCookie.firstPartyDomain === "") delete cleanCookie.firstPartyDomain;
+      if (cleanCookie.sameSite === null) delete cleanCookie.sameSite;
+      return cleanCookie;
     });
 
-    // STEP 1: Auto-click "+ New" or "Create project" if landing on the front page dashboard
+    await page.setCookie(...sanitizedCookies);
+    console.log('[Google Flow] Successfully loaded secure session cookies.');
+
+    // STEP 1: Open Google Flow
+    console.log('[Google Flow] Opening flow.google.com...');
+    await page.goto('https://flow.google.com', { waitUntil: 'networkidle2', timeout: 60000 });
+
+    // STEP 2: Click "+ New" or create project button
     console.log('[Google Flow] Checking for New Project / Create button...');
-    try {
-      const createButtonClicked = await page.evaluate(() => {
-        const elements = Array.from(document.querySelectorAll('button, div, span'));
-        const createBtn = elements.find(el => {
-          const text = el.innerText?.trim().toLowerCase();
-          return text === '+ new' || text === 'new project' || text === 'create project' || text === '+ create';
-        });
-        
-        if (createBtn) {
-          createBtn.click();
-          return true;
-        }
-        return false;
-      });
-
-      if (createButtonClicked) {
-        console.log('[Google Flow] Clicked "New Project" successfully. Waiting for workspace...');
-        await new Promise(r => setTimeout(r, 4000));
-      } else {
-        console.log('[Google Flow] Already inside a project or button not found. Proceeding...');
-      }
-    } catch (e) {
-      console.log('[Google Flow] Skipping project creation step.');
-    }
-
-    // STEP 2: Select "Nano Banana 2.1" model (with automatic fallback to "Nano Banana Pro")
-    console.log('[Google Flow] Selecting model: Nano Banana 2.1 (Fallback: Nano Banana Pro)...');
-    try {
-      const modelMenuOpened = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span'));
-        const dropdownBtn = buttons.find(b => {
-          const text = b.innerText?.toLowerCase() || '';
-          return text.includes('banana') || text.includes('model') || text.includes('imagen') || b.querySelector('svg');
-        });
-        if (dropdownBtn) {
-          dropdownBtn.click();
-          return true;
-        }
-        return false;
-      });
-
-      if (modelMenuOpened) {
-        await new Promise(r => setTimeout(r, 1500));
-        
-        await page.evaluate(() => {
-          const items = Array.from(document.querySelectorAll('div, span, button, li, option'));
-          
-          const target21 = items.find(el => el.innerText?.trim().toLowerCase().includes('nano banana 2.1'));
-          if (target21) {
-            target21.click();
-            console.log('Selected Nano Banana 2.1');
-          } else {
-            const targetPro = items.find(el => el.innerText?.trim().toLowerCase().includes('nano banana pro'));
-            if (targetPro) {
-              targetPro.click();
-              console.log('Fallback to Nano Banana Pro selected');
-            }
-          }
-        });
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    } catch (modelErr) {
-      console.warn('[Google Flow] Model selection warning (proceeding with default):', modelErr.message);
-    }
-
-    // STEP 3: Find prompt text box and type prompt
-    const promptSelector = 'textarea, input[placeholder*="prompt" i], input[type="text"]';
-    await page.waitForSelector(promptSelector, { timeout: 30000 });
+    await page.waitForSelector('button, [role="button"]', { timeout: 15000 });
     
-    await page.type(promptSelector, promptText, { delay: 30 });
-    console.log('[Google Flow] Prompt entered into box.');
+    const newProjectClicked = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"], div'));
+      const target = buttons.find(b => {
+        const text = b.innerText?.trim().toLowerCase() || '';
+        const aria = b.getAttribute('aria-label')?.toLowerCase() || '';
+        return text.includes('new') || text.includes('create') || text.includes('+') || aria.includes('new') || aria.includes('create');
+      });
+      if (target) {
+        target.click();
+        return true;
+      }
+      return false;
+    });
 
-    // STEP 4: Click the Generate button
+    if (!newProjectClicked) {
+      throw new Error('Could not find New Project / Create button.');
+    }
+
+    console.log('[Google Flow] Clicked "New Project" successfully. Waiting for workspace...');
+    await new Promise(r => setTimeout(r, 4000));
+
+    // STEP 3: Select model (Nano Banana 2.1 / Pro fallback)
+    console.log('[Google Flow] Selecting model: Nano Banana 2.1 (Fallback: Nano Banana Pro)...');
+    await page.evaluate(() => {
+      const elements = Array.from(document.querySelectorAll('*'));
+      const modelEl = elements.find(el => el.innerText && (el.innerText.includes('Nano Banana') || el.innerText.includes('Model')));
+      if (modelEl) modelEl.click();
+    });
+    await new Promise(r => setTimeout(r, 2000));
+
+    // STEP 4: Enter prompt into text area/box
+    console.log('[Google Flow] Entering prompt...');
+    const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
+    await page.waitForSelector(inputSelector, { timeout: 15000 });
+    
+    await page.evaluate((userPrompt) => {
+      const input = document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
+      if (input) {
+        input.focus();
+        if (input.tagName === 'INPUT' || input.tagName === 'TEXTAREA') {
+          input.value = userPrompt;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+          input.innerText = userPrompt;
+          input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        }
+      }
+    }, prompt);
+
+    console.log('[Google Flow] Prompt entered into box.');
+    await new Promise(r => setTimeout(r, 1000));
+
+    // STEP 5: Trigger generation (Click button or fallback to Enter key)
+    console.log('[Google Flow] Triggering generation...');
     const clicked = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const genBtn = buttons.find(b => 
-        b.innerText.toLowerCase().includes('generate') || 
-        b.getAttribute('aria-label')?.toLowerCase().includes('generate')
-      );
+      const elements = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
+      const genBtn = elements.find(el => {
+        const text = el.innerText?.trim().toLowerCase() || '';
+        const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
+        const testId = el.getAttribute('data-testid')?.toLowerCase() || '';
+        
+        return text.includes('generate') || 
+               text.includes('create') || 
+               text.includes('run') ||
+               aria.includes('generate') || 
+               aria.includes('create') || 
+               aria.includes('send') ||
+               testId.includes('submit') ||
+               testId.includes('generate');
+      });
+
       if (genBtn) {
         genBtn.click();
         return true;
@@ -150,62 +145,43 @@ async function generateImageViaGoogleFlow(promptText) {
     });
 
     if (!clicked) {
-      throw new Error('Generate button could not be located in Google Flow DOM.');
+      console.log('[Google Flow] Submit button icon not found directly, pressing Enter key...');
+      await page.keyboard.press('Enter');
     }
 
     console.log('[Google Flow] Generation triggered. Waiting for image result...');
 
-    // STEP 5: Wait for resulting image to render
-    const imgSelector = 'img[src*="blob:"], img[src*="googleusercontent"], img[alt*="generated" i]';
-    await page.waitForSelector(imgSelector, { timeout: 90000 });
-
-    const imageUrl = await page.$eval(imgSelector, img => img.src);
-    console.log('[Google Flow] Image successfully retrieved!');
+    // STEP 6: Wait for generated image URL to appear in DOM
+    const imageUrl = await page.evaluate(async () => {
+      const startTime = Date.now();
+      while (Date.now() - startTime < 60000) { // Wait up to 60 seconds
+        const allImgs = Array.from(document.querySelectorAll('img'));
+        const generatedImg = allImgs.find(i => i.src && i.naturalWidth > 200);
+        if (generatedImg) {
+          return generatedImg.src;
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+      return null;
+    });
 
     await browser.close();
-    return imageUrl;
+
+    if (!imageUrl) {
+      throw new Error('Image generation timed out or image URL could not be extracted from the DOM.');
+    }
+
+    console.log('[Google Flow] Success! Image URL retrieved.');
+    return res.json({ success: true, imageUrl });
 
   } catch (error) {
-    await browser.close();
+    if (browser) await browser.close();
     console.error('[Google Flow Error]:', error.message);
-    throw new Error(`Google Flow Automation Failed: ${error.message}`);
+    return res.status(500).json({ success: false, error: error.message });
   }
-}
-
-/**
- * Luna Web AI Request Endpoint
- * POST /api/generate-image
- * Body: { "prompt": "cybernetic arctic fox" }
- */
-app.post('/api/generate-image', async (req, res) => {
-  const { prompt } = req.body;
-
-  if (!prompt) {
-    return res.status(400).json({ success: false, error: 'Missing "prompt" parameter in request body.' });
-  }
-
-  try {
-    const imageUrl = await generateImageViaGoogleFlow(prompt);
-    
-    res.json({
-      success: true,
-      prompt,
-      imageUrl
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Server status & wake-up endpoint
-app.get('/', (req, res) => {
-  res.send('Luna Google Flow Bridge Server is active.');
 });
 
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-  
+        
