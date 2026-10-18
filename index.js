@@ -15,7 +15,6 @@ try {
   console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON.');
 }
 
-// Fallback loader if stored differently
 try {
   if (groqKeys.length === 0 && process.env.GROQ_KEYS_JSON) {
     groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON);
@@ -64,7 +63,7 @@ async function callGroqWithRotation(messages, options = {}) {
 // -----------------------------------------------------------
 
 app.get('/', (req, res) => {
-  res.send('Luna Google Flow Bridge Server with Instant Diagnostics is active.');
+  res.send('Luna Google Flow Bridge Server with Qwen Vision Diagnostics is active.');
 });
 
 app.post('/api/generate-image', async (req, res) => {
@@ -139,9 +138,6 @@ app.post('/api/generate-image', async (req, res) => {
         }
         return false;
       });
-      if (!clickedNew) {
-        console.warn('[Warning] Could not find explicit "New Project" button, attempting to proceed anyway...');
-      }
       await new Promise(r => setTimeout(r, 4000));
     }
 
@@ -150,7 +146,6 @@ app.post('/api/generate-image', async (req, res) => {
     console.log(`[Google Flow] Step 3: ${currentStep}...`);
     const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
     
-    // Wait for input with explicit error check
     try {
       await page.waitForSelector(inputSelector, { timeout: 15000 });
     } catch (e) {
@@ -273,27 +268,42 @@ app.post('/api/generate-image', async (req, res) => {
   } catch (error) {
     console.error(`[Google Flow Error during "${currentStep}"]:`, error.message);
     
-    let aiReason = 'Could not generate AI diagnostic.';
+    let aiReason = 'Could not generate AI vision diagnostic.';
     if (browser && groqKeys.length > 0) {
       try {
-        const page = (await browser.pages())[0];
-        if (page) {
-          const pageDiagnostics = await page.evaluate(() => {
-            return {
-              title: document.title,
-              currentUrl: window.location.href,
-              visibleText: document.body.innerText.slice(0, 1200),
-              buttons: Array.from(document.querySelectorAll('button, [role="button"]')).map(b => b.innerText?.trim()).filter(Boolean).slice(0, 15)
-            };
-          });
+        const pages = await browser.pages();
+        if (pages.length > 0) {
+          const page = pages[0];
+          // TAKE SCREENSHOT AS BASE64 FOR QWEN VISION
+          console.log('[AI Diagnostics] Capturing browser screenshot for Qwen 3.8 Vision analysis...');
+          const screenshotBase64 = await page.screenshot({ encoding: 'base64', fullPage: true });
 
           aiReason = await callGroqWithRotation([
-            { role: 'system', content: 'You are an expert web automation debugging agent. Look at the failed step and page diagnostics to explain precisely what went wrong on Google Flow.' },
-            { role: 'user', content: `Failed Step: ${currentStep}\nError: ${error.message}\nDiagnostics: ${JSON.stringify(pageDiagnostics)}` }
-          ], { max_tokens: 250 });
+            {
+              role: 'system',
+              content: 'You are an expert web automation debugging agent with vision capabilities. Analyze this screenshot of the stuck Google Flow browser interface. Identify any visual errors, popups, blank spaces, stuck loading states, or reason why image generation did not finish.'
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: `Failed Step: ${currentStep}\nError: ${error.message}\nAnalyze the attached screenshot of the current page state to find out why it got stuck:` },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:image/png;base64,${screenshotBase64}`
+                  }
+                }
+              ]
+            }
+          ], { max_tokens: 350 });
+          
+          console.log('\n================ QWEN VISION DIAGNOSTIC REPORT ================\n');
+          console.log(aiReason);
+          console.log('\n================================================================\n');
         }
       } catch (diagErr) {
-        aiReason = 'Diagnostic capture failed: ' + diagErr.message;
+        aiReason = 'Vision diagnostic capture failed: ' + diagErr.message;
+        console.error('[AI Diagnostics Error]:', diagErr.message);
       }
     }
 
@@ -310,4 +320,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
-        
+  
