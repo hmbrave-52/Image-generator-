@@ -7,13 +7,20 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// --- GROQ KEY ROTATOR MANAGER (Using qwen/qwen3.8-27b) ---
-const groqKeys = [
-  process.env.GROQ_API_KEY_1,
-  process.env.GROQ_API_KEY_2,
-  process.env.GROQ_API_KEY_3,
-  process.env.GROQ_API_KEY
-].filter(Boolean);
+// --- DYNAMIC GROQ KEY ROTATOR (Parses single JSON secret) ---
+let groqKeys = [];
+try {
+  groqKeys = JSON.parse(process.env.GROQ_KEYS_JSON || '[]');
+} catch (e) {
+  console.error('[Groq Manager] Error parsing GROQ_KEYS_JSON. Ensure it is a valid JSON array.');
+}
+
+// Fallback to single key if JSON parsing fails or isn't used
+if (groqKeys.length === 0 && process.env.GROQ_API_KEY) {
+  groqKeys.push(process.env.GROQ_API_KEY);
+}
+
+console.log(`[Groq Manager] Successfully loaded ${groqKeys.length} API keys into rotation pool.`);
 
 let currentKeyIndex = 0;
 
@@ -51,7 +58,7 @@ async function callGroqWithRotation(messages, options = {}) {
 // -----------------------------------------------------------
 
 app.get('/', (req, res) => {
-  res.send('Luna Google Flow Bridge Server with Qwen/Groq Agent is active.');
+  res.send('Luna Google Flow Bridge Server with Qwen Diagnostics is active.');
 });
 
 app.post('/api/generate-image', async (req, res) => {
@@ -76,23 +83,16 @@ app.post('/api/generate-image', async (req, res) => {
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
-
-    // Mask with real desktop Chrome User-Agent to preserve account sync
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36');
 
-    // SAFETY CHECK: Load cookies strictly from Render private environment variable
     if (!process.env.GOOGLE_COOKIES_JSON) {
       throw new Error('Security Error: GOOGLE_COOKIES_JSON environment variable is missing.');
     }
 
     const rawCookies = JSON.parse(process.env.GOOGLE_COOKIES_JSON);
-
-    // Clean cookies to remove null partitionKeys and incompatible attributes
     const sanitizedCookies = rawCookies.map(cookie => {
       const cleanCookie = { ...cookie };
-      if (!cleanCookie.partitionKey || cleanCookie.partitionKey === null) {
-        delete cleanCookie.partitionKey;
-      }
+      if (!cleanCookie.partitionKey || cleanCookie.partitionKey === null) delete cleanCookie.partitionKey;
       if (cleanCookie.storeId === null) delete cleanCookie.storeId;
       if (cleanCookie.firstPartyDomain === "") delete cleanCookie.firstPartyDomain;
       if (cleanCookie.sameSite === null) delete cleanCookie.sameSite;
@@ -106,10 +106,8 @@ app.post('/api/generate-image', async (req, res) => {
     console.log('[Google Flow] Opening flow.google.com...');
     await page.goto('https://flow.google.com', { waitUntil: 'networkidle2', timeout: 60000 });
 
-    // STEP 2: Check workspace status / reuse or create project
-    console.log('[Google Flow] Checking workspace status...');
+    // STEP 2: Check workspace status
     await new Promise(r => setTimeout(r, 3000));
-
     const isInputPresent = await page.evaluate(() => {
       return !!document.querySelector('textarea, input[type="text"], [contenteditable="true"]');
     });
@@ -126,8 +124,6 @@ app.post('/api/generate-image', async (req, res) => {
         if (target) target.click();
       });
       await new Promise(r => setTimeout(r, 4000));
-    } else {
-      console.log('[Google Flow] Workspace already open. Reusing project for account sync.');
     }
 
     // STEP 3: Select model if available
@@ -138,7 +134,7 @@ app.post('/api/generate-image', async (req, res) => {
     });
     await new Promise(r => setTimeout(r, 1000));
 
-    // STEP 4: Enter prompt into text area/box
+    // STEP 4: Enter prompt
     console.log('[Google Flow] Entering prompt...');
     const inputSelector = 'textarea, input[type="text"], [contenteditable="true"]';
     await page.waitForSelector(inputSelector, { timeout: 15000 });
@@ -158,78 +154,32 @@ app.post('/api/generate-image', async (req, res) => {
       }
     }, prompt);
 
-    console.log('[Google Flow] Prompt entered into box.');
     await new Promise(r => setTimeout(r, 1000));
 
-    // STEP 5: Trigger generation (with Qwen agent fallback)
+    // STEP 5: Trigger generation
     console.log('[Google Flow] Triggering generation...');
-    let clicked = await page.evaluate(() => {
-      const elements = Array.from(document.querySelectorAll('button, [role="button"], div, span'));
-      const genBtn = elements.find(el => {
-        const text = el.innerText?.trim().toLowerCase() || '';
-        const aria = el.getAttribute('aria-label')?.toLowerCase() || '';
-        const testId = el.getAttribute('data-testid')?.toLowerCase() || '';
-        
-        return text.includes('generate') || 
-               text.includes('create') || 
-               text.includes('run') ||
-               aria.includes('generate') || 
-               aria.includes('create') || 
-               aria.includes('send') ||
-               testId.includes('submit') ||
-               testId.includes('generate');
-      });
-
-      if (genBtn) {
-        genBtn.click();
-        return true;
-      }
-      return false;
-    });
-
-    if (!clicked && groqKeys.length > 0) {
-      console.log('[Google Flow] Standard button match needs assistant. Querying Qwen agent...');
-      const domSummary = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('button, [role="button"], div, span'))
-          .map(el => el.innerText?.trim())
-          .filter(t => t && t.length < 30)
-          .slice(0, 40);
-      });
-
-      const agentResponse = await callGroqWithRotation([
-        { role: 'system', content: 'You are a browser automation helper. Analyze the UI text elements and determine how to submit.' },
-        { role: 'user', content: `Visible UI elements: ${JSON.stringify(domSummary)}. Which one triggers generation?` }
-      ]);
-      console.log('[Qwen Agent Analysis]:', agentResponse);
-    }
-
-    // Fallback confirmation via Enter key
     await page.keyboard.press('Enter');
-    console.log('[Google Flow] Generation triggered. Activating network interceptor...');
 
-    // NETWORK INTERCEPTOR: Filters out profile avatars and thumbnails
+    // NETWORK INTERCEPTOR
     let interceptedImageUrl = null;
     page.on('response', async (response) => {
       try {
         const url = response.url();
-        if (url.includes('=s32') || url.includes('=s64') || url.includes('avatar') || url.includes('favicon') || url.includes('logo')) {
-          return;
-        }
+        if (url.includes('=s32') || url.includes('=s64') || url.includes('avatar') || url.includes('favicon') || url.includes('logo')) return;
 
-        if ((url.includes('googleusercontent.com') || url.includes('gen_img') || url.endsWith('.png') || url.endsWith('.jpg') || url.endsWith('.webp')) &&
-            !url.includes('favicon')) {
+        if ((url.includes('googleusercontent.com') || url.includes('gen_img') || url.endsWith('.png') || url.endsWith('.jpg') || url.endsWith('.webp')) && !url.includes('favicon')) {
           const contentType = response.headers()['content-type'] || '';
           if (contentType.includes('image') || url.includes('googleusercontent.com')) {
             if (!interceptedImageUrl) {
               interceptedImageUrl = url;
-              console.log('[Google Flow] Intercepted real generated image URL:', url);
+              console.log('[Google Flow] Intercepted generated image URL:', url);
             }
           }
         }
       } catch (e) {}
     });
 
-    // STEP 6: Wait for image result (up to 150s)
+    // STEP 6: Wait for image result
     const startTime = Date.now();
     while (Date.now() - startTime < 150000) {
       if (interceptedImageUrl) break;
@@ -250,21 +200,48 @@ app.post('/api/generate-image', async (req, res) => {
         break;
       }
 
+      await new Response?.();
       await new Promise(r => setTimeout(r, 3000));
     }
 
-    await browser.close();
-
+    // --- AI ERROR DIAGNOSTICIAN IF IT STICKS ---
     if (!interceptedImageUrl) {
-      throw new Error('Image generation timed out or image URL could not be captured.');
+      console.warn('[AI Diagnostics] Image generation timed out. Asking Qwen agent to analyze page state...');
+      
+      // Grab current page state, text snippets, and visible error hints for the agent
+      const pageDiagnostics = await page.evaluate(() => {
+        return {
+          title: document.title,
+          currentUrl: window.location.href,
+          visibleText: document.body.innerText.slice(0, 1500), // first 1500 chars of page
+          hasCaptcha: document.body.innerText.toLowerCase().includes('captcha') || document.body.innerText.toLowerCase().includes('verify'),
+          hasError: document.body.innerText.toLowerCase().includes('error') || document.body.innerText.toLowerCase().includes('failed')
+        };
+      });
+
+      let aiReason = 'Unknown timeout reason.';
+      if (groqKeys.length > 0) {
+        try {
+          aiReason = await callGroqWithRotation([
+            { role: 'system', content: 'You are an expert web automation debugging agent. Analyze the provided Google Flow browser state and explain why the image generation got stuck or failed.' },
+            { role: 'user', content: `Page diagnostics: ${JSON.stringify(pageDiagnostics)}` }
+          ], { max_tokens: 200 });
+        } catch (err) {
+          aiReason = 'AI diagnostic failed to execute: ' + err.message;
+        }
+      }
+
+      await browser.close();
+      throw new Error(`Generation stuck / timed out. AI Diagnostic Report: ${aiReason}`);
     }
 
+    await browser.close();
     console.log('[Google Flow] Success! Real image URL retrieved.');
     return res.json({ success: true, imageUrl: interceptedImageUrl });
 
   } catch (error) {
     if (browser) await browser.close();
-    console.log('[Google Flow Error]:', error.message);
+    console.error('[Google Flow Error]:', error.message);
     return res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -272,3 +249,4 @@ app.post('/api/generate-image', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[Luna Server] Listening on port ${PORT}`);
 });
+        
